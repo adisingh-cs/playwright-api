@@ -79,6 +79,8 @@ app.post("/submit", async (req, res) => {
       ]
     });
 
+    let judgeResult = null;
+
     const context = await browser.newContext({
       storageState: { cookies },
       userAgent:
@@ -86,62 +88,79 @@ app.post("/submit", async (req, res) => {
       viewport: { width: 1280, height: 800 }
     });
 
-    const page = await context.newPage();
+    context.on("response", async (response) => {
+      try {
+        const url = response.url();
+        const text = await response.text().catch(() => null);
 
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
-      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-      window.chrome = { runtime: {} };
+        if (!text || text.length < 2) return;
+
+        if (url.includes("submit") || url.includes("interpret_solution")) {
+          const json = JSON.parse(text);
+          if (json.status_msg) judgeResult = json.status_msg;
+          if (json.state) judgeResult = json.state;
+        }
+
+        if (url.includes("submissions/detail")) {
+          const json = JSON.parse(text);
+          if (json.status_msg) judgeResult = json.status_msg;
+        }
+      } catch (_) {}
     });
 
-    const problemUrl = `https://leetcode.com/problems/${slug}/`;
-    await page.goto(problemUrl, {
+    const page = await context.newPage();
+
+    await page.goto(`https://leetcode.com/problems/${slug}/`, {
       waitUntil: "networkidle",
-      timeout: 90000
+      timeout: 120000
     });
 
     await page.waitForSelector(".monaco-editor", { timeout: 60000 });
     await page.waitForTimeout(1500);
 
     await page.evaluate((code) => {
-      const editor = window.monaco?.editor;
-      if (editor) {
-        let model = editor.getModels()[0];
-        if (model) model.setValue(code);
-      }
+      const editor = window.monaco.editor;
+      const model = editor.getModels()[0];
+      model.setValue(code);
     }, code);
 
     const submitButton = page.getByRole("button", { name: "Submit" });
-    await submitButton.waitFor({ timeout: 45000 });
+    await submitButton.waitFor({ timeout: 60000 });
     await submitButton.click();
 
-    const selectors = [
+    const uiSelectors = [
       ".judge-result",
       ".submission-result",
+      "[data-e2e-locator='judge-status']",
       "[data-e2e-locator='submission-result__status']",
+      "[data-e2e-locator='submit-result']",
       ".text-success",
       ".text-danger"
     ];
 
-    let verdict = null;
+    let uiVerdict = null;
+    const start = Date.now();
+    const MAX_WAIT = 120000;
 
-    for (const sel of selectors) {
-      try {
-        await page.waitForSelector(sel, { timeout: 30000 });
-        verdict = await page.textContent(sel);
-        break;
-      } catch (_) {}
+    while (!judgeResult && Date.now() - start < MAX_WAIT) {
+      for (const sel of uiSelectors) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            uiVerdict = await el.innerText();
+            break;
+          }
+        } catch (_) {}
+      }
+      if (uiVerdict) break;
+      await page.waitForTimeout(500);
     }
 
     await browser.close();
 
-    if (!verdict) verdict = "Unknown (LeetCode UI changed or submission too slow)";
+    const finalVerdict = judgeResult || uiVerdict || "Unknown";
 
-    return res.json({
-      slug,
-      verdict
-    });
+    return res.json({ slug, verdict: finalVerdict });
 
   } catch (error) {
     return res.status(500).json({
