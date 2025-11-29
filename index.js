@@ -9,11 +9,38 @@ app.use(express.json());
 // HEALTH CHECK
 // =================================
 app.get("/", (req, res) => {
-  res.send("LeetCode API Submitter (No UI, Cloudflare-proof) is running.");
+  res.send("LeetCode API Submitter (Final Stable Version) is running.");
 });
 
 // =================================
-// SUBMIT SOLUTION (No UI Webpage)
+// GET QUESTION ID (GraphQL)
+// =================================
+async function getQuestionId(page, slug) {
+  const query = {
+    query: `
+      query questionData($titleSlug: String!) {
+        question(titleSlug: $titleSlug) {
+          questionId
+        }
+      }
+    `,
+    variables: { titleSlug: slug }
+  };
+
+  const resp = await page.request.post("https://leetcode.com/graphql/", {
+    headers: {
+      "Content-Type": "application/json",
+      "Referer": `https://leetcode.com/problems/${slug}/`,
+    },
+    data: query
+  });
+
+  const json = await resp.json();
+  return json?.data?.question?.questionId || null;
+}
+
+// =================================
+// SUBMIT SOLUTION
 // =================================
 app.post("/submit", async (req, res) => {
   const { slug, lang, code } = req.body;
@@ -30,65 +57,57 @@ app.post("/submit", async (req, res) => {
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const context = await browser.newContext({
-      storageState: { cookies }
-    });
-
+    const context = await browser.newContext({ storageState: { cookies } });
     const page = await context.newPage();
 
-    // Request URL
+    // 1️⃣ Get questionId using GraphQL
+    const questionId = await getQuestionId(page, slug);
+
+    if (!questionId) {
+      throw new Error("Could not fetch questionId from GraphQL");
+    }
+
+    // 2️⃣ Submit via API
     const submitUrl = `https://leetcode.com/problems/${slug}/submit/`;
 
-    // Request Payload
     const payload = {
-      question_id: null, // We'll fetch this
-      typed_code: code,
+      question_id: questionId,
       lang: lang,
+      typed_code: code
     };
 
-    // Fetch question metadata first to get ID
-    const questionResp = await page.request.get(
-      `https://leetcode.com/api/problems/${slug.replace(/-/g, "_")}/`
-    );
-    const questionJson = await questionResp.json();
-    payload.question_id = questionJson.stat.question_id;
-
-    // Submit the solution
-    const response = await page.request.post(submitUrl, {
+    const resp = await page.request.post(submitUrl, {
       headers: {
         "Content-Type": "application/json",
-        "Referer": `https://leetcode.com/problems/${slug}/`,
+        "Referer": `https://leetcode.com/problems/${slug}/`
       },
       data: payload
     });
 
-    const submitData = await response.json();
-    const submissionId = submitData.submission_id || submitData.submissionId;
+    const submitJson = await resp.json();
+    const submissionId = submitJson?.submission_id || submitJson?.submissionId;
 
-    if (!submissionId) {
-      throw new Error("Failed to get submission ID");
-    }
+    if (!submissionId) throw new Error("Failed to obtain submissionId");
 
-    // ==== POLL RESULTS ====
+    // 3️⃣ Poll submission result
     let verdict = "Pending";
-    let attempts = 0;
+    let attempt = 0;
 
-    while (attempts < 100) {
+    while (attempt < 120) {
       const checkResp = await page.request.get(
         `https://leetcode.com/submissions/detail/${submissionId}/check/`
       );
-      const checkJson = await checkResp.json();
 
-      if (
-        checkJson?.status_msg &&
-        !["Pending", "Judging"].includes(checkJson.status_msg)
-      ) {
-        verdict = checkJson.status_msg;
+      const checkJson = await checkResp.json();
+      const status = checkJson?.status_msg;
+
+      if (status && !["Pending", "Judging"].includes(status)) {
+        verdict = status;
         break;
       }
 
-      attempts++;
       await new Promise((r) => setTimeout(r, 1000));
+      attempt++;
     }
 
     await browser.close();
