@@ -5,16 +5,10 @@ const fs = require("fs");
 const app = express();
 app.use(express.json());
 
-// ===============================
-// 1. Health Check
-// ===============================
 app.get("/", (req, res) => {
   res.send("LeetCode Browser Automation API is running.");
 });
 
-// ===============================
-// 2. /run - simple test route
-// ===============================
 app.post("/run", async (req, res) => {
   try {
     const cookies = JSON.parse(fs.readFileSync("./cookies.json", "utf8"));
@@ -39,7 +33,6 @@ app.post("/run", async (req, res) => {
 
     const page = await context.newPage();
 
-    // Stealth patches
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => false });
       Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
@@ -65,9 +58,6 @@ app.post("/run", async (req, res) => {
   }
 });
 
-// ===============================
-// 3. /submit - FULL LEETCODE SUBMISSION ENDPOINT
-// ===============================
 app.post("/submit", async (req, res) => {
   const { slug, lang, code } = req.body;
 
@@ -98,7 +88,6 @@ app.post("/submit", async (req, res) => {
 
     const page = await context.newPage();
 
-    // Stealth patches
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => false });
       Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
@@ -112,11 +101,9 @@ app.post("/submit", async (req, res) => {
       timeout: 90000
     });
 
-    // Ensure Monaco editor is fully ready
     await page.waitForSelector(".monaco-editor", { timeout: 60000 });
-    await page.waitForTimeout(1500); // let Monaco load models
+    await page.waitForTimeout(1500);
 
-    // Insert code safely
     await page.evaluate((code) => {
       const editor = window.monaco?.editor;
       if (editor) {
@@ -125,21 +112,31 @@ app.post("/submit", async (req, res) => {
       }
     }, code);
 
-    // Wait for the Submit button
     const submitButton = page.getByRole("button", { name: "Submit" });
     await submitButton.waitFor({ timeout: 45000 });
-
-    // Click Submit
     await submitButton.click();
 
-    // Wait for result notification
-    await page.waitForSelector(".notification__content", {
-      timeout: 90000
-    });
+    const selectors = [
+      ".judge-result",
+      ".submission-result",
+      "[data-e2e-locator='submission-result__status']",
+      ".text-success",
+      ".text-danger"
+    ];
 
-    const verdict = await page.innerText(".notification__content");
+    let verdict = null;
+
+    for (const sel of selectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 30000 });
+        verdict = await page.textContent(sel);
+        break;
+      } catch (_) {}
+    }
 
     await browser.close();
+
+    if (!verdict) verdict = "Unknown (LeetCode UI changed or submission too slow)";
 
     return res.json({
       slug,
@@ -153,9 +150,6 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// ===============================
-// 4. Render Required Listener
-// ===============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on PORT ${PORT}`);
