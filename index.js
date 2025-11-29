@@ -5,43 +5,51 @@ const fs = require("fs");
 const app = express();
 app.use(express.json());
 
-// =================================
-// HEALTH CHECK
-// =================================
-app.get("/", (req, res) => {
-  res.send("LeetCode API Submitter (Final Stable Version) is running.");
-});
+// ==========================================
+// Helper: Build Headers With Cookies
+// ==========================================
+function buildHeaders(cookies) {
+  const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
 
-// =================================
-// GET QUESTION ID (GraphQL)
-// =================================
-async function getQuestionId(page, slug) {
-  const query = {
-    query: `
-      query questionData($titleSlug: String!) {
-        question(titleSlug: $titleSlug) {
-          questionId
-        }
-      }
-    `,
-    variables: { titleSlug: slug }
+  const csrf = cookies.find(c => c.name === "csrftoken")?.value;
+
+  return {
+    "Content-Type": "application/json",
+    "Cookie": cookieHeader,
+    "x-csrftoken": csrf,
+    "Referer": "https://leetcode.com",
+    "Origin": "https://leetcode.com",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*"
   };
+}
 
-  const resp = await page.request.post("https://leetcode.com/graphql/", {
-    headers: {
-      "Content-Type": "application/json",
-      "Referer": `https://leetcode.com/problems/${slug}/`,
-    },
-    data: query
+// ==========================================
+// GraphQL: Fetch questionId
+// ==========================================
+async function fetchQuestionId(page, slug, headers) {
+  const response = await page.request.post("https://leetcode.com/graphql/", {
+    headers,
+    data: {
+      query: `
+        query questionData($titleSlug: String!) {
+          question(titleSlug: $titleSlug) {
+            questionId
+          }
+        }
+      `,
+      variables: { titleSlug: slug }
+    }
   });
 
-  const json = await resp.json();
+  const json = await response.json();
   return json?.data?.question?.questionId || null;
 }
 
-// =================================
-// SUBMIT SOLUTION
-// =================================
+// ==========================================
+// /submit Endpoint
+// ==========================================
 app.post("/submit", async (req, res) => {
   const { slug, lang, code } = req.body;
 
@@ -51,6 +59,7 @@ app.post("/submit", async (req, res) => {
 
   try {
     const cookies = JSON.parse(fs.readFileSync("./cookies.json", "utf8"));
+    const headers = buildHeaders(cookies);
 
     const browser = await chromium.launch({
       headless: true,
@@ -60,42 +69,40 @@ app.post("/submit", async (req, res) => {
     const context = await browser.newContext({ storageState: { cookies } });
     const page = await context.newPage();
 
-    // 1️⃣ Get questionId using GraphQL
-    const questionId = await getQuestionId(page, slug);
+    // 1) Get questionId
+    const questionId = await fetchQuestionId(page, slug, headers);
 
     if (!questionId) {
-      throw new Error("Could not fetch questionId from GraphQL");
+      throw new Error("Could not fetch questionId (GraphQL returned null)");
     }
 
-    // 2️⃣ Submit via API
-    const submitUrl = `https://leetcode.com/problems/${slug}/submit/`;
+    // 2) Submit
+    const submitResp = await page.request.post(
+      `https://leetcode.com/problems/${slug}/submit/`,
+      {
+        headers,
+        data: {
+          question_id: questionId,
+          lang,
+          typed_code: code
+        }
+      }
+    );
 
-    const payload = {
-      question_id: questionId,
-      lang: lang,
-      typed_code: code
-    };
-
-    const resp = await page.request.post(submitUrl, {
-      headers: {
-        "Content-Type": "application/json",
-        "Referer": `https://leetcode.com/problems/${slug}/`
-      },
-      data: payload
-    });
-
-    const submitJson = await resp.json();
-    const submissionId = submitJson?.submission_id || submitJson?.submissionId;
+    const submitJson = await submitResp.json();
+    const submissionId =
+      submitJson?.submission_id || submitJson?.submissionId;
 
     if (!submissionId) throw new Error("Failed to obtain submissionId");
 
-    // 3️⃣ Poll submission result
+    // 3) Poll judge result
     let verdict = "Pending";
-    let attempt = 0;
+    let attempts = 0;
 
-    while (attempt < 120) {
+    while (attempts < 120) {
       const checkResp = await page.request.get(
-        `https://leetcode.com/submissions/detail/${submissionId}/check/`
+        `https://leetcode.com/submissions/detail/${submissionId}/check/`,
+        { headers }
       );
 
       const checkJson = await checkResp.json();
@@ -106,8 +113,8 @@ app.post("/submit", async (req, res) => {
         break;
       }
 
-      await new Promise((r) => setTimeout(r, 1000));
-      attempt++;
+      await new Promise(r => setTimeout(r, 1000));
+      attempts++;
     }
 
     await browser.close();
@@ -118,14 +125,14 @@ app.post("/submit", async (req, res) => {
       verdict
     });
 
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
-// =================================
-// REQUIRED FOR RENDER
-// =================================
+// ==========================================
+// PORT
+// ==========================================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on PORT ${PORT}`);
