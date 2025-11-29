@@ -5,12 +5,16 @@ const fs = require("fs");
 const app = express();
 app.use(express.json());
 
-// Health check route
+// ===============================
+// 1. Health Check
+// ===============================
 app.get("/", (req, res) => {
   res.send("LeetCode Browser Automation API is running.");
 });
 
-// Test automation route
+// ===============================
+// 2. /run - simple test route
+// ===============================
 app.post("/run", async (req, res) => {
   try {
     const cookies = JSON.parse(fs.readFileSync("./cookies.json", "utf8"));
@@ -49,13 +53,9 @@ app.post("/run", async (req, res) => {
     });
 
     const title = await page.title();
-
     await browser.close();
 
-    return res.json({
-      status: "success",
-      title
-    });
+    return res.json({ status: "success", title });
 
   } catch (error) {
     return res.status(500).json({
@@ -66,7 +66,7 @@ app.post("/run", async (req, res) => {
 });
 
 // ===============================
-// NEW: LeetCode Submission Route
+// 3. /submit - FULL LEETCODE SUBMISSION ENDPOINT
 // ===============================
 app.post("/submit", async (req, res) => {
   const { slug, lang, code } = req.body;
@@ -92,7 +92,8 @@ app.post("/submit", async (req, res) => {
     const context = await browser.newContext({
       storageState: { cookies },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 800 }
     });
 
     const page = await context.newPage();
@@ -107,23 +108,33 @@ app.post("/submit", async (req, res) => {
 
     const problemUrl = `https://leetcode.com/problems/${slug}/`;
     await page.goto(problemUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
+      waitUntil: "networkidle",
+      timeout: 90000
     });
 
-    await page.waitForSelector(".monaco-editor", { timeout: 30000 });
+    // Ensure Monaco editor is fully ready
+    await page.waitForSelector(".monaco-editor", { timeout: 60000 });
+    await page.waitForTimeout(1500); // let Monaco load models
 
-    // Insert code in Monaco
+    // Insert code safely
     await page.evaluate((code) => {
-      window.monaco.editor.getModels()[0].setValue(code);
+      const editor = window.monaco?.editor;
+      if (editor) {
+        let model = editor.getModels()[0];
+        if (model) model.setValue(code);
+      }
     }, code);
 
-    // Click submit
-    await page.click("button[data-e2e-locator='submit-code-btn']");
+    // Wait for the Submit button
+    const submitButton = page.getByRole("button", { name: "Submit" });
+    await submitButton.waitFor({ timeout: 45000 });
 
-    // Wait for result popup
+    // Click Submit
+    await submitButton.click();
+
+    // Wait for result notification
     await page.waitForSelector(".notification__content", {
-      timeout: 60000
+      timeout: 90000
     });
 
     const verdict = await page.innerText(".notification__content");
@@ -142,7 +153,9 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// Required for Render
+// ===============================
+// 4. Render Required Listener
+// ===============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on PORT ${PORT}`);
