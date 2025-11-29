@@ -5,45 +5,31 @@ const fs = require("fs");
 const app = express();
 app.use(express.json());
 
+// ===============================
+// Health Check
+// ===============================
 app.get("/", (req, res) => {
   res.send("LeetCode Browser Automation API is running.");
 });
 
+// ===============================
+// Simple Test Route
+// ===============================
 app.post("/run", async (req, res) => {
   try {
     const cookies = JSON.parse(fs.readFileSync("./cookies.json", "utf8"));
 
     const browser = await chromium.launch({
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled"
-      ]
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
     const context = await browser.newContext({
-      storageState: { cookies },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
-      viewport: { width: 1280, height: 800 }
+      storageState: { cookies }
     });
 
     const page = await context.newPage();
-
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
-      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-      window.chrome = { runtime: {} };
-    });
-
-    await page.goto("https://leetcode.com/problemset/all/", {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
+    await page.goto("https://leetcode.com/problemset/all/", { waitUntil: "domcontentloaded" });
 
     const title = await page.title();
     await browser.close();
@@ -51,13 +37,13 @@ app.post("/run", async (req, res) => {
     return res.json({ status: "success", title });
 
   } catch (error) {
-    return res.status(500).json({
-      status: "error",
-      error: error.message
-    });
+    return res.status(500).json({ status: "error", error: error.message });
   }
 });
 
+// ===============================
+// FULL SUBMISSION ROUTE (REST API BACKUP)
+// ===============================
 app.post("/submit", async (req, res) => {
   const { slug, lang, code } = req.body;
 
@@ -72,38 +58,26 @@ app.post("/submit", async (req, res) => {
 
     const browser = await chromium.launch({
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled"
-      ]
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    let judgeResult = null;
+    let submissionId = null;
 
     const context = await browser.newContext({
-      storageState: { cookies },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      viewport: { width: 1280, height: 800 }
+      storageState: { cookies }
     });
 
+    // Intercept network to capture submission ID
     context.on("response", async (response) => {
       try {
         const url = response.url();
-        const text = await response.text().catch(() => null);
-
-        if (!text || text.length < 2) return;
-
-        if (url.includes("submit") || url.includes("interpret_solution")) {
-          const json = JSON.parse(text);
-          if (json.status_msg) judgeResult = json.status_msg;
-          if (json.state) judgeResult = json.state;
-        }
-
-        if (url.includes("submissions/detail")) {
-          const json = JSON.parse(text);
-          if (json.status_msg) judgeResult = json.status_msg;
+        if (url.includes("/submit/")) {
+          const json = await response.json().catch(() => null);
+          if (json?.submission_id) {
+            submissionId = json.submission_id;
+          } else if (json?.submissionId) {
+            submissionId = json.submissionId;
+          }
         }
       } catch (_) {}
     });
@@ -115,52 +89,78 @@ app.post("/submit", async (req, res) => {
       timeout: 120000
     });
 
+    // Wait for Monaco editor
     await page.waitForSelector(".monaco-editor", { timeout: 60000 });
     await page.waitForTimeout(1500);
 
+    // Insert code into Monaco
     await page.evaluate((code) => {
       const editor = window.monaco.editor;
       const model = editor.getModels()[0];
       model.setValue(code);
     }, code);
 
-    const submitButton = page.getByRole("button", { name: "Submit" });
-    await submitButton.waitFor({ timeout: 60000 });
+    // Try multiple submit button names
+    const submitNames = ["Submit", "Submit Code", "Submit Solution", "Run and Submit"];
+
+    let submitButton = null;
+
+    for (let name of submitNames) {
+      try {
+        submitButton = page.getByRole("button", { name });
+        await submitButton.waitFor({ timeout: 5000 });
+        break;
+      } catch (_) {}
+    }
+
+    if (!submitButton) throw new Error("Submit button not found");
+
     await submitButton.click();
 
-    const uiSelectors = [
-      ".judge-result",
-      ".submission-result",
-      "[data-e2e-locator='judge-status']",
-      "[data-e2e-locator='submission-result__status']",
-      "[data-e2e-locator='submit-result']",
-      ".text-success",
-      ".text-danger"
-    ];
-
-    let uiVerdict = null;
+    // Wait 3 seconds for submission API response
     const start = Date.now();
-    const MAX_WAIT = 120000;
+    while (!submissionId && Date.now() - start < 8000) {
+      await page.waitForTimeout(300);
+    }
 
-    while (!judgeResult && Date.now() - start < MAX_WAIT) {
-      for (const sel of uiSelectors) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            uiVerdict = await el.innerText();
-            break;
-          }
-        } catch (_) {}
+    // Fallback: fetch latest submission via REST API
+    if (!submissionId) {
+      const apiUrl = `https://leetcode.com/api/submissions/${slug}/`;
+      const latest = await page.request.get(apiUrl);
+      const data = await latest.json();
+
+      if (!data?.submissions_dump?.length) {
+        throw new Error("Could not fetch latest submissions");
       }
-      if (uiVerdict) break;
-      await page.waitForTimeout(500);
+
+      submissionId = data.submissions_dump[0].id;
+    }
+
+    // Poll submission status
+    let verdict = "Unknown";
+    const maxWait = 180000;
+    const pollStart = Date.now();
+
+    while (Date.now() - pollStart < maxWait) {
+      const checkUrl = `https://leetcode.com/submissions/detail/${submissionId}/check/`;
+      const resp = await page.request.get(checkUrl);
+      const data = await resp.json();
+
+      if (data?.status_msg && data.status_msg !== "Pending" && data.status_msg !== "Judging") {
+        verdict = data.status_msg;
+        break;
+      }
+
+      await page.waitForTimeout(800);
     }
 
     await browser.close();
 
-    const finalVerdict = judgeResult || uiVerdict || "Unknown";
-
-    return res.json({ slug, verdict: finalVerdict });
+    return res.json({
+      slug,
+      verdict,
+      submissionId
+    });
 
   } catch (error) {
     return res.status(500).json({
@@ -169,7 +169,10 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+// ===============================
+// REQUIRED FOR RENDER
+// ===============================
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on PORT ${PORT}`);
 });
