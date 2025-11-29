@@ -6,7 +6,7 @@
     "httpOnly": false,
     "name": "__stripe_mid",
     "path": "/",
-    "sameSite": "strict",
+    "sameSite": "Strict",
     "secure": true,
     "session": false,
     "storeId": null,
@@ -19,7 +19,7 @@
     "httpOnly": false,
     "name": "csrftoken",
     "path": "/",
-    "sameSite": "lax",
+    "sameSite": "Lax",
     "secure": true,
     "session": false,
     "storeId": null,
@@ -44,7 +44,7 @@
     "httpOnly": true,
     "name": "LEETCODE_SESSION",
     "path": "/",
-    "sameSite": "lax",
+    "sameSite": "Lax",
     "secure": true,
     "session": false,
     "storeId": null,
@@ -56,10 +56,10 @@
     "httpOnly": true,
     "name": "messages",
     "path": "/",
-    "sameSite": "lax",
+    "sameSite": "Lax",
     "secure": true,
     "session": true,
     "storeId": null,
-    "value": "W1siX19qc29uX21lc3NhZ2UiLDAsMjUsIlN1Y2Nlc3NmdWxseSB..."
+    "value": "W1siX19qc29uX21lc3NhZ2UiLDAsMjUsIlN1Y..."
   }
 ]
